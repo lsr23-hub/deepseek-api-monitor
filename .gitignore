@@ -1,0 +1,22 @@
+# Swift / SPM
+.build/
+DerivedData/
+*.xcodeproj
+xcuserdata/
+.swiftpm/
+
+# macOS
+.DS_Store
+*.dSYM/
+
+# Secrets (never commit these)
+.env
+*.pem
+*.key
+credentials.*
+*_secret*
+*_token*
+
+# IDE
+.idea/
+.vscode/
