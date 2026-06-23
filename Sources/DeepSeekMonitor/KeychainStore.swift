@@ -7,6 +7,8 @@ enum KeychainStore {
     enum Key: String {
         case apiKey = "com.deepseek-monitor.api-key"
         case platformToken = "com.deepseek-monitor.platform-token"
+        case kuaipaoAccessToken = "com.deepseek-monitor.kuaipao-access-token"
+        case kuaipaoUserId = "com.deepseek-monitor.kuaipao-user-id"
     }
 
     static func save(_ value: String, for key: Key) {

@@ -22,6 +22,11 @@ struct MenuBarContent: View {
                 emptyStateView
             }
 
+            // Kuaipao balance section
+            if showKuaipaoSection {
+                kuaipaoSection
+            }
+
             // Footer status bar
             Divider()
                 .padding(.vertical, 8)
@@ -162,6 +167,128 @@ struct MenuBarContent: View {
                         .foregroundColor(.secondary)
                 }
             }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.primary.opacity(0.05))
+        )
+    }
+
+    // MARK: - Kuaipao Section
+
+    private var showKuaipaoSection: Bool {
+        viewModel.kuaipaoUserData != nil || (!viewModel.kuaipaoAccessToken.isEmpty && !viewModel.kuaipaoUserId.isEmpty)
+    }
+
+    private var kuaipaoSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Divider()
+                .padding(.vertical, 8)
+
+            HStack(spacing: 6) {
+                Image(systemName: "chart.bar.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.orange)
+                Text("快跑 API")
+                    .font(.system(size: 13, weight: .semibold))
+            }
+            .padding(.bottom, 10)
+
+            if let error = viewModel.kuaipaoError, viewModel.kuaipaoUserData == nil {
+                HStack {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10))
+                        .foregroundColor(.orange)
+                    Text(error)
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                }
+            } else if let _ = viewModel.kuaipaoUserData {
+                VStack(alignment: .leading, spacing: 10) {
+                    // Total remaining
+                    VStack(spacing: 4) {
+                        HStack {
+                            Text("剩余额度")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            kuaipaoStatusBadge
+                        }
+                        HStack {
+                            Text(viewModel.kuaipaoFormattedRemaining)
+                                .font(.system(size: 28, weight: .bold, design: .rounded))
+                                .foregroundColor(.primary)
+                            Spacer()
+                        }
+                    }
+                    .padding(12)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color.primary.opacity(0.05))
+                    )
+
+                    HStack(spacing: 8) {
+                        kuaipaoSubCard(
+                            title: "已使用",
+                            value: viewModel.kuaipaoFormattedUsed,
+                            systemImage: "arrow.up.circle.fill",
+                            color: .orange
+                        )
+                        kuaipaoSubCard(
+                            title: "总额度",
+                            value: viewModel.kuaipaoFormattedTotal,
+                            systemImage: "creditcard.fill",
+                            color: .blue
+                        )
+                    }
+                }
+            } else if viewModel.kuaipaoIsLoading {
+                HStack {
+                    Spacer()
+                    ProgressView()
+                        .scaleEffect(0.7)
+                    Text("加载中…")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                    Spacer()
+                }
+                .padding(.vertical, 8)
+            }
+        }
+    }
+
+    private var kuaipaoStatusBadge: some View {
+        HStack(spacing: 3) {
+            Circle()
+                .fill(viewModel.kuaipaoStatusColor)
+                .frame(width: 6, height: 6)
+            Text(kuaipaoStatusText)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(viewModel.kuaipaoStatusColor)
+        }
+    }
+
+    private var kuaipaoStatusText: String {
+        if viewModel.kuaipaoError != nil { return "错误" }
+        if viewModel.kuaipaoUserData != nil { return "正常" }
+        return "未配置"
+    }
+
+    private func kuaipaoSubCard(title: String, value: String, systemImage: String, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 3) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 9))
+                    .foregroundColor(color)
+                Text(title)
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+            }
+            Text(value)
+                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                .foregroundColor(.primary)
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)

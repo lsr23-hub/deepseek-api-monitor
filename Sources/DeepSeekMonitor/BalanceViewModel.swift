@@ -26,15 +26,33 @@ final class BalanceViewModel: ObservableObject {
     @Published var monthlyCost: MonthlyCostSummary?
     @Published var monthlyCostError: String?
 
+    // Kuaipao API state (stored in Keychain)
+    @Published var kuaipaoAccessToken: String {
+        didSet {
+            KeychainStore.save(kuaipaoAccessToken, for: .kuaipaoAccessToken)
+        }
+    }
+    @Published var kuaipaoUserId: String {
+        didSet {
+            KeychainStore.save(kuaipaoUserId, for: .kuaipaoUserId)
+        }
+    }
+    @Published var kuaipaoUserData: KuaipaoUserData?
+    @Published var kuaipaoError: String?
+    @Published var kuaipaoIsLoading = false
+    @Published var kuaipaoQuotaPerUnit: Int = 500_000
+
     // MARK: - Constants
 
     static let cachedBalanceKey = "cached_balance_data"
     static let cachedMonthlyCostKey = "cached_monthly_cost"
+    static let cachedKuaipaoUsageKey = "cached_kuaipao_usage"
     static let defaultRefreshInterval: TimeInterval = 300 // 5 minutes
 
     // MARK: - Private
 
     private let client = DeepSeekClient.shared
+    private let kuaipaoClient = KuaipaoClient.shared
     private var refreshTask: Task<Void, Never>?
     private var cancellables = Set<AnyCancellable>()
 
@@ -53,8 +71,23 @@ final class BalanceViewModel: ObservableObject {
 
         self.apiKey = KeychainStore.read(.apiKey) ?? ""
         self.platformToken = KeychainStore.read(.platformToken) ?? ""
+
+        // Kuaipao: migrate from UserDefaults to Keychain, then read from Keychain
+        if let legacyKpToken = UserDefaults.standard.string(forKey: "kuaipao_access_token"), !legacyKpToken.isEmpty {
+            KeychainStore.save(legacyKpToken, for: .kuaipaoAccessToken)
+            UserDefaults.standard.removeObject(forKey: "kuaipao_access_token")
+        }
+        if let legacyKpUid = UserDefaults.standard.string(forKey: "kuaipao_user_id"), !legacyKpUid.isEmpty {
+            KeychainStore.save(legacyKpUid, for: .kuaipaoUserId)
+            UserDefaults.standard.removeObject(forKey: "kuaipao_user_id")
+        }
+        self.kuaipaoAccessToken = KeychainStore.read(.kuaipaoAccessToken) ?? ""
+        self.kuaipaoUserId = KeychainStore.read(.kuaipaoUserId) ?? ""
+        let savedQpu = UserDefaults.standard.integer(forKey: "kuaipao_quota_per_unit")
+        kuaipaoQuotaPerUnit = savedQpu > 0 ? savedQpu : 500_000
         loadCachedBalance()
         loadCachedMonthlyCost()
+        loadCachedKuaipaoUsage()
         startAutoRefresh()
     }
 
@@ -124,15 +157,51 @@ final class BalanceViewModel: ObservableObject {
         }.joined(separator: "\n")
     }
 
+    // MARK: - Kuaipao Computed Properties
+
+    /// Account remaining quota.
+    /// Account remaining balance in currency.
+    var kuaipaoFormattedRemaining: String {
+        guard let user = kuaipaoUserData else { return "$--" }
+        let money = Double(user.quota) / Double(kuaipaoQuotaPerUnit)
+        return formatMoney(money)
+    }
+
+    /// Account used amount in currency.
+    var kuaipaoFormattedUsed: String {
+        guard let user = kuaipaoUserData else { return "$--" }
+        let money = Double(user.usedQuota) / Double(kuaipaoQuotaPerUnit)
+        return formatMoney(money)
+    }
+
+    /// Account total (remaining + used) in currency.
+    var kuaipaoFormattedTotal: String {
+        guard let user = kuaipaoUserData else { return "$--" }
+        let money = Double(user.totalQuota) / Double(kuaipaoQuotaPerUnit)
+        return formatMoney(money)
+    }
+
+    /// Usage progress (0.0-1.0) for progress bar.
+    var kuaipaoUsageProgress: Double? {
+        guard let user = kuaipaoUserData, user.totalQuota > 0 else { return nil }
+        return min(Double(user.usedQuota) / Double(user.totalQuota), 1.0)
+    }
+
+    var kuaipaoStatusColor: Color {
+        guard kuaipaoError == nil else { return .red }
+        guard kuaipaoUserData != nil else { return .gray }
+        return .green
+    }
+
+    /// Display name or username from kuaipao.
+    var kuaipaoDisplayName: String {
+        kuaipaoUserData?.displayName ?? kuaipaoUserData?.username ?? "快跑"
+    }
+
     // MARK: - Actions
 
     func refresh() {
         guard !isLoading else { return }
-        guard !apiKey.isEmpty else {
-            errorMessage = "请先设置 API Key"
-            showSettings = true
-            return
-        }
 
         refreshTask?.cancel()
         refreshTask = Task { @MainActor in
@@ -141,23 +210,30 @@ final class BalanceViewModel: ObservableObject {
 
             defer { self.isLoading = false }
 
-            do {
-                let result = try await client.fetchBalance(apiKey: apiKey)
-                try Task.checkCancellation()
-                self.balance = result
-                self.lastRefresh = Date()
-                self.errorMessage = nil
-                self.cacheBalance(result)
+            // DeepSeek balance
+            if !self.apiKey.isEmpty {
+                do {
+                    let result = try await client.fetchBalance(apiKey: apiKey)
+                    try Task.checkCancellation()
+                    self.balance = result
+                    self.lastRefresh = Date()
+                    self.errorMessage = nil
+                    self.cacheBalance(result)
 
-                // Fetch monthly cost in parallel if platformToken is set
-                if !self.platformToken.isEmpty {
-                    await self.refreshMonthlyCost()
+                    if !self.platformToken.isEmpty {
+                        await self.refreshMonthlyCost()
+                    }
+                } catch is CancellationError {
+                    return
+                } catch {
+                    try? Task.checkCancellation()
+                    self.errorMessage = error.localizedDescription
                 }
-            } catch is CancellationError {
-                // Task was cancelled; don't overwrite state
-            } catch {
-                try? Task.checkCancellation()
-                self.errorMessage = error.localizedDescription
+            }
+
+            // Kuaipao balance (independent of DeepSeek)
+            if !self.kuaipaoAccessToken.isEmpty, !self.kuaipaoUserId.isEmpty {
+                await self.refreshKuaipao()
             }
         }
     }
@@ -188,6 +264,39 @@ final class BalanceViewModel: ObservableObject {
         } catch {
             try? Task.checkCancellation()
             self.monthlyCostError = error.localizedDescription
+        }
+    }
+
+    func refreshKuaipao() async {
+        guard !kuaipaoAccessToken.isEmpty, !kuaipaoUserId.isEmpty else {
+            kuaipaoError = nil
+            return
+        }
+
+        kuaipaoIsLoading = true
+        defer { kuaipaoIsLoading = false }
+
+        // Refresh quota-per-unit conversion rate
+        let qpu = await kuaipaoClient.fetchQuotaPerUnit()
+        if qpu > 0 {
+            kuaipaoQuotaPerUnit = qpu
+            UserDefaults.standard.set(qpu, forKey: "kuaipao_quota_per_unit")
+        }
+
+        do {
+            let user = try await kuaipaoClient.fetchAccountBalance(
+                accessToken: kuaipaoAccessToken,
+                userId: kuaipaoUserId
+            )
+            try Task.checkCancellation()
+            self.kuaipaoUserData = user
+            self.kuaipaoError = nil
+            self.cacheKuaipaoUsage(user)
+        } catch is CancellationError {
+            // ignore
+        } catch {
+            try? Task.checkCancellation()
+            self.kuaipaoError = error.localizedDescription
         }
     }
 
@@ -240,5 +349,29 @@ final class BalanceViewModel: ObservableObject {
             return
         }
         self.monthlyCost = cached
+    }
+
+    private func cacheKuaipaoUsage(_ user: KuaipaoUserData) {
+        guard let data = try? JSONEncoder().encode(user) else { return }
+        UserDefaults.standard.set(data, forKey: Self.cachedKuaipaoUsageKey)
+    }
+
+    private func loadCachedKuaipaoUsage() {
+        guard let data = UserDefaults.standard.data(forKey: Self.cachedKuaipaoUsageKey),
+              let cached = try? JSONDecoder().decode(KuaipaoUserData.self, from: data) else {
+            return
+        }
+        self.kuaipaoUserData = cached
+    }
+
+    /// Format quota as money: $X.XX or $X.XX万 for large values.
+    private func formatMoney(_ value: Double) -> String {
+        if value >= 10_000 {
+            return String(format: "$%.2f万", value / 10_000)
+        } else if value >= 1 {
+            return String(format: "$%.2f", value)
+        } else {
+            return String(format: "$%.4f", value)
+        }
     }
 }
